@@ -6,6 +6,7 @@ namespace Pest\Browser\Playwright\Servers;
 
 use JsonException;
 use Pest\Browser\Contracts\PlaywrightServer;
+use Pest\Plugins\Parallel;
 use RuntimeException;
 
 /**
@@ -13,6 +14,11 @@ use RuntimeException;
  */
 final readonly class AlreadyStartedPlaywrightServer implements PlaywrightServer
 {
+    /**
+     * The environment variable holding the path of this run's state file.
+     */
+    private const string STATE_FILE_VARIABLE = 'PEST_BROWSER_PLAYWRIGHT_STATE_FILE';
+
     /**
      * Creates a new already started playwright server instance.
      */
@@ -115,9 +121,49 @@ final readonly class AlreadyStartedPlaywrightServer implements PlaywrightServer
 
     /**
      * Returns the state file of the Playwright server.
+     *
+     * The path is unique per run and lives in the system temporary directory,
+     * so that concurrent Pest runs cannot overwrite or delete each other's
+     * state: every run terminates by unlinking this file, including runs that
+     * never touched a browser test.
+     *
+     * The main process resolves the path once and exports it to the
+     * environment; parallel workers inherit it and never resolve their own.
      */
     private static function path(): string
     {
-        return dirname(__DIR__, 3).'/.temp/playwright-server.json';
+        $path = getenv(self::STATE_FILE_VARIABLE);
+
+        if (is_string($path) && $path !== '') {
+            return $path;
+        }
+
+        if (Parallel::isWorker()) {
+            throw new RuntimeException(
+                'The Playwright server state file was not inherited from the main process.'
+            );
+        }
+
+        $processId = getmypid();
+
+        if ($processId === false) {
+            throw new RuntimeException('Could not determine the current process id.');
+        }
+
+        $path = sprintf(
+            '%s%spest-playwright-server.%d.json',
+            sys_get_temp_dir(),
+            DIRECTORY_SEPARATOR,
+            $processId,
+        );
+
+        putenv(self::STATE_FILE_VARIABLE.'='.$path);
+
+        // Symfony's Process intersects getenv() with $_SERVER when composing a
+        // child's environment, so a putenv-only value never reaches a worker.
+        $_ENV[self::STATE_FILE_VARIABLE] = $path;
+        $_SERVER[self::STATE_FILE_VARIABLE] = $path;
+
+        return $path;
     }
 }
