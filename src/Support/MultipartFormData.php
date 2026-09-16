@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Pest\Browser\Support;
 
-use Symfony\Component\HttpFoundation\File\UploadedFile;
+use Illuminate\Http\UploadedFile;
 
 /**
  * Splits a `multipart/form-data` body into the parameters and uploaded files a
@@ -88,6 +88,14 @@ final readonly class MultipartFormData
                 file_put_contents($path, $contents);
 
                 $temporaryPaths[] = $path;
+                // Illuminate's UploadedFile, not Symfony's. Laravel converts an
+                // incoming Symfony file with UploadedFile::createFromBase(), whose
+                // $test argument defaults to false, so the test flag set here would
+                // be dropped and isValid() would fall through to is_uploaded_file().
+                // That is false for a file we wrote ourselves, so every upload would
+                // fail the `uploaded` rule with "failed to upload" and look like an
+                // application bug. createFromBase returns an Illuminate instance
+                // unchanged, so building one here preserves the flag.
                 $uploads[] = new UploadedFile($path, $filename, $mimeType, UPLOAD_ERR_OK, true);
             }
 
