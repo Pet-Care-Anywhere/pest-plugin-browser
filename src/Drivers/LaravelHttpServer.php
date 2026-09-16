@@ -22,6 +22,7 @@ use Pest\Browser\Contracts\HttpServer;
 use Pest\Browser\Exceptions\ServerNotFoundException;
 use Pest\Browser\Execution;
 use Pest\Browser\GlobalState;
+use Pest\Browser\Support\MultipartFormData;
 use Psr\Log\NullLogger;
 use Symfony\Component\Mime\MimeTypes;
 use Throwable;
@@ -239,8 +240,14 @@ final class LaravelHttpServer implements HttpServer
         $method = mb_strtoupper($request->getMethod());
         $rawBody = (string) $request->getBody();
         $parameters = [];
+        $files = [];
+        $multipart = null;
         if ($method !== 'GET' && str_starts_with(mb_strtolower($contentType), 'application/x-www-form-urlencoded')) {
             parse_str($rawBody, $parameters);
+        } elseif ($method !== 'GET' && MultipartFormData::matches($contentType)) {
+            $multipart = MultipartFormData::parse($contentType, $rawBody);
+            $parameters = $multipart->parameters;
+            $files = $multipart->files;
         }
 
         $symfonyRequest = Request::create(
@@ -248,7 +255,7 @@ final class LaravelHttpServer implements HttpServer
             $method,
             $parameters,
             $request->getCookies(),
-            [], // @TODO files...
+            $files,
             [], // @TODO server variables...
             $rawBody
         );
@@ -267,6 +274,8 @@ final class LaravelHttpServer implements HttpServer
             throw $e;
         } finally {
             config(['app.debug' => $debug]);
+
+            $multipart?->cleanup();
         }
 
         $kernel->terminate($laravelRequest, $response);

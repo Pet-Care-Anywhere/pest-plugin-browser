@@ -144,9 +144,17 @@ final class Execution
         $start = microtime(true);
         $end = $start + ($timeout / 1_000);
 
+        // Each attempt is capped well below the configured budget so a genuinely
+        // missing expectation still fails fast and leaves room to retry. The cap
+        // scales with the budget rather than staying at a flat second, so an app
+        // whose pages take longer than that can raise its own ceiling through
+        // pest()->browser()->timeout(...) instead of every attempt timing out and
+        // only the final unbounded call ever succeeding.
+        $attemptTimeout = max(1_000, (int) ($timeout / 4));
+
         while (microtime(true) < $end) {
             try {
-                return Playwright::usingTimeout(1_000, $callback);
+                return Playwright::usingTimeout($attemptTimeout, $callback);
             } catch (ExpectationFailedException) {
                 //
             }

@@ -25,7 +25,7 @@ trait InteractsWithFrames
 
         $contentFrameObj = $locator->contentFrame();
 
-        expect($contentFrameObj)->not->toBeNull("Expected to find iframe on the page initially with the url [{$this->initialUrl}] using the selector [{$selector}], but it was not found.");
+        expect($contentFrameObj)->not->toBeNull("Expected to find iframe on the page with {$this->pageUrls()} using the selector [{$selector}], but it was not found.");
 
         assert($contentFrameObj !== null);
 

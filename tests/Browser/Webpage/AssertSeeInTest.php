@@ -35,3 +35,15 @@ it('may fail when asserting text is not in a selector but it is', function (): v
 
     $page->assertDontSeeIn('#content', 'Hello World');
 })->throws(ExpectationFailedException::class);
+
+it('reports the visible page text when the text is not found within the selector', function (): void {
+    Route::get('/', fn (): string => '<div id="panel">Nothing here</div>');
+
+    $page = visit('/');
+
+    expect(fn () => $page->assertSeeIn('#panel', 'Everything here'))->toThrow(
+        function (ExpectationFailedException $e): void {
+            expect($e->getMessage())->toContain("The page's visible text was: [Nothing here]");
+        },
+    );
+});
