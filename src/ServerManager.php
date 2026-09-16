@@ -51,6 +51,17 @@ final class ServerManager
 
     /**
      * Returns the Playwright server process instance.
+     *
+     * The port is found once, with the server, and never again. Finding one per
+     * call burned an ephemeral port on every call, and worse, rewrote the
+     * persisted state file with a port nothing was listening on, so a parallel
+     * worker reading the file between two calls would dial a dead port.
+     *
+     * The command is prefixed with `exec` so the shell is replaced by node
+     * rather than forking it. Without it the server that `stop()` signals is
+     * the shell, and node survives as an orphan holding its port and about
+     * 40MB. A completed run leaks exactly one; a fortnight of local runs had
+     * left 285 of them alive, holding 11GB.
      */
     public function playwright(): PlaywrightServer
     {
@@ -58,11 +69,15 @@ final class ServerManager
             return AlreadyStartedPlaywrightServer::fromPersisted();
         }
 
+        if ($this->playwright instanceof PlaywrightServer) {
+            return $this->playwright;
+        }
+
         $port = Port::find();
 
-        $this->playwright ??= PlaywrightNpmServer::create(
+        $this->playwright = PlaywrightNpmServer::create(
             PackageJsonDirectory::find(),
-            '.'.DIRECTORY_SEPARATOR.'node_modules'.DIRECTORY_SEPARATOR.'.bin'.DIRECTORY_SEPARATOR.'playwright run-server --host %s --port %d --mode launchServer',
+            'exec .'.DIRECTORY_SEPARATOR.'node_modules'.DIRECTORY_SEPARATOR.'.bin'.DIRECTORY_SEPARATOR.'playwright run-server --host %s --port %d --mode launchServer',
             self::DEFAULT_HOST,
             $port,
             'Listening on',

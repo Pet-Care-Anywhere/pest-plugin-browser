@@ -12,6 +12,7 @@ use Amp\Http\Server\Request as AmpRequest;
 use Amp\Http\Server\RequestHandler\ClosureRequestHandler;
 use Amp\Http\Server\Response;
 use Amp\Http\Server\SocketHttpServer;
+use Amp\Socket\SocketException;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Testing\Concerns\WithoutExceptionHandlingHandler;
@@ -23,6 +24,7 @@ use Pest\Browser\Exceptions\ServerNotFoundException;
 use Pest\Browser\Execution;
 use Pest\Browser\GlobalState;
 use Pest\Browser\Support\MultipartFormData;
+use Pest\Browser\Support\Port;
 use Psr\Log\NullLogger;
 use Symfony\Component\Mime\MimeTypes;
 use Throwable;
@@ -34,6 +36,18 @@ use Throwable;
  */
 final class LaravelHttpServer implements HttpServer
 {
+    /**
+     * How many ports to try before giving up on binding this server.
+     *
+     * Port::find() asks the kernel for a free port, closes it, and returns the
+     * number, so the port is only known to be free at the moment it is given
+     * up. Under `--parallel` several workers ask within the same few
+     * milliseconds and can be handed the same number. Losing that race raises a
+     * SocketException on bind, which is loud rather than silent, so the answer
+     * is simply to ask for another one.
+     */
+    private const int BIND_ATTEMPTS = 5;
+
     /**
      * The underlying socket server instance, if any.
      */
@@ -54,7 +68,7 @@ final class LaravelHttpServer implements HttpServer
      */
     public function __construct(
         public readonly string $host,
-        public readonly int $port,
+        public int $port,
     ) {
         //
     }
@@ -98,13 +112,29 @@ final class LaravelHttpServer implements HttpServer
             return;
         }
 
-        $this->socket = $server = SocketHttpServer::createForDirectAccess(new NullLogger());
+        for ($attempt = 1; ; $attempt++) {
+            $server = SocketHttpServer::createForDirectAccess(new NullLogger());
 
-        $server->expose("{$this->host}:{$this->port}");
-        $server->start(
-            new ClosureRequestHandler($this->handleRequest(...)),
-            new DefaultErrorHandler(),
-        );
+            try {
+                $server->expose("{$this->host}:{$this->port}");
+                $server->start(
+                    new ClosureRequestHandler($this->handleRequest(...)),
+                    new DefaultErrorHandler(),
+                );
+            } catch (SocketException $e) {
+                if ($attempt >= self::BIND_ATTEMPTS) {
+                    throw $e;
+                }
+
+                $this->port = Port::find();
+
+                continue;
+            }
+
+            $this->socket = $server;
+
+            return;
+        }
     }
 
     /**
