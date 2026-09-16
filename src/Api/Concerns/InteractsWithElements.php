@@ -176,11 +176,11 @@ trait InteractsWithElements
     }
 
     /**
-     * Attach the given file to the field.
+     * Attach the given file, or files, to the field.
      */
-    public function attach(string $field, string $path): self
+    public function attach(string $field, string ...$paths): self
     {
-        $this->guessLocator($field)->setInputFiles($path);
+        $this->guessLocator($field)->setInputFiles(...$paths);
 
         return $this;
     }

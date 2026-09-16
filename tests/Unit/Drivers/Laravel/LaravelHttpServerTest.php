@@ -55,3 +55,35 @@ it('parses multipart form data, including uploaded files and spoofed methods', f
 
     unlink($path);
 });
+
+it('delivers several attached files to the application', function (): void {
+    Route::get('/uploads', fn (): string => '
+        <form method="POST" action="/uploads" enctype="multipart/form-data">
+            <input type="file" id="documents" name="documents[]" multiple>
+            <button type="submit">Send</button>
+        </form>
+    ');
+
+    Route::post('/uploads', function (Request $request): string {
+        $documents = $request->file('documents');
+
+        return '<p>files='.implode(' ', array_map(
+            fn (UploadedFile $document): string => $document->getClientOriginalName().':'.$document->getContent(),
+            is_array($documents) ? $documents : [],
+        )).'</p>';
+    });
+
+    $first = tempnam(sys_get_temp_dir(), 'pest-browser-test');
+    $second = tempnam(sys_get_temp_dir(), 'pest-browser-test');
+    file_put_contents($first, 'first contents');
+    file_put_contents($second, 'second contents');
+
+    $page = visit('/uploads');
+
+    $page->attach('#documents', $first, $second)
+        ->click('Send')
+        ->assertSee('files='.basename($first).':first contents '.basename($second).':second contents');
+
+    unlink($first);
+    unlink($second);
+});
