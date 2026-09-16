@@ -8,6 +8,7 @@ use Amp\CancelledException;
 use Amp\TimeoutCancellation;
 use Amp\Websocket\Client\WebsocketConnection;
 use Generator;
+use Pest\Browser\Exceptions\ActionTimedOutException;
 use Pest\Browser\Exceptions\PlaywrightOutdatedException;
 use PHPUnit\Framework\ExpectationFailedException;
 
@@ -126,8 +127,10 @@ final class Client
             ? microtime(true) + (($timeout + self::DEADLINE_GRACE_MILLISECONDS) / 1_000)
             : null;
 
+        $subject = $this->subject($method, $params, $timeout);
+
         while (true) {
-            $responseJson = $this->fetch($this->websocketConnection, $requestId, $method, $timeout, $deadline);
+            $responseJson = $this->fetch($this->websocketConnection, $requestId, $subject, $deadline);
             /** @var array{id: string|null, params: array{add: string|null}, error: array{error: array{message: string|null}}} $response */
             $response = json_decode($responseJson, true);
 
@@ -192,8 +195,7 @@ final class Client
     private function fetch(
         WebsocketConnection $client,
         string $requestId,
-        string $method,
-        int $timeout,
+        string $subject,
         ?float $deadline,
     ): string {
         if ($deadline === null) {
@@ -213,10 +215,28 @@ final class Client
         } catch (CancelledException) {
             $this->abandon($requestId);
 
-            throw new ExpectationFailedException(
-                sprintf('Timeout %dms exceeded while waiting for [%s].', $timeout, $method)
-            );
+            throw new ExpectationFailedException($subject.'.', null, new ActionTimedOutException($subject));
         }
+    }
+
+    /**
+     * Describes what a request was waiting for, for use in a failure message.
+     *
+     * The selector is named whenever the request carries one, because it is the
+     * difference between a reader knowing a label was renamed and a reader
+     * having to open the test to find out which label was even asked for.
+     *
+     * @param  array<string, mixed>  $params
+     */
+    private function subject(string $method, array $params, int $timeout): string
+    {
+        $subject = sprintf('Timeout %dms exceeded while waiting for [%s]', $timeout, $method);
+
+        if (isset($params['selector']) && is_string($params['selector']) && $params['selector'] !== '') {
+            $subject .= sprintf(' on selector [%s]', $params['selector']);
+        }
+
+        return $subject;
     }
 
     /**
