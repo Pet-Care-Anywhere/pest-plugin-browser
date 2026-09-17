@@ -10,7 +10,10 @@ use Amp\Websocket\Client\WebsocketConnection;
 use Generator;
 use Pest\Browser\Exceptions\ActionTimedOutException;
 use Pest\Browser\Exceptions\PlaywrightOutdatedException;
+use Pest\Browser\Support\JavaScriptSerializer;
+use Pest\Browser\Support\Str;
 use PHPUnit\Framework\ExpectationFailedException;
+use Throwable;
 
 use function Amp\Websocket\Client\connect;
 
@@ -29,6 +32,37 @@ final class Client
      * loaded machine.
      */
     private const int DEADLINE_GRACE_MILLISECONDS = 5_000;
+
+    /**
+     * The whole budget, in milliseconds, allowed for describing a failed match.
+     *
+     * Both diagnostic calls share this one clock, so the worst case a failing
+     * action can pay for its own explanation is a single constant, however many
+     * queries the explanation turns out to need. It is deliberately far below a
+     * normal action timeout: neither query waits for anything on the page, so a
+     * healthy browser answers in milliseconds and the budget is only ever
+     * reached by a browser that has stopped answering at all.
+     */
+    private const int DIAGNOSTIC_BUDGET_MILLISECONDS = 1_000;
+
+    /**
+     * How many of the matched elements a failure message names.
+     *
+     * Two is enough to tell the reader what kind of collision they have - a
+     * heading sharing a button's label, a table header eating a click - without
+     * turning the message into a DOM dump.
+     */
+    private const int NAMED_MATCHES = 2;
+
+    /**
+     * The maximum number of characters of a matched element's text included.
+     */
+    private const int MATCH_TEXT_LENGTH = 40;
+
+    /**
+     * Reads the tag and text of the first few elements a selector matched.
+     */
+    private const string NAMED_MATCHES_EXPRESSION = '(elements, limit) => elements.slice(0, limit).map((element) => ({ tag: element.tagName, text: element.innerText || element.textContent || "" }))';
 
     /**
      * How many abandoned request ids to remember.
@@ -127,35 +161,41 @@ final class Client
             ? microtime(true) + (($timeout + self::DEADLINE_GRACE_MILLISECONDS) / 1_000)
             : null;
 
-        $subject = $this->subject($method, $params, $timeout);
+        try {
+            while (true) {
+                $responseJson = $this->fetch($this->websocketConnection, $deadline);
+                /** @var array{id: string|null, params: array{add: string|null}, error: array{error: array{message: string|null}}} $response */
+                $response = json_decode($responseJson, true);
 
-        while (true) {
-            $responseJson = $this->fetch($this->websocketConnection, $requestId, $subject, $deadline);
-            /** @var array{id: string|null, params: array{add: string|null}, error: array{error: array{message: string|null}}} $response */
-            $response = json_decode($responseJson, true);
-
-            if (isset($response['id']) && in_array($response['id'], $this->abandoned, true)) {
-                continue;
-            }
-
-            if (isset($response['error']['error']['message'])) {
-                $message = $response['error']['error']['message'];
-
-                if (str_contains($message, 'Playwright was just installed or updated')) {
-                    throw new PlaywrightOutdatedException();
+                if (isset($response['id']) && in_array($response['id'], $this->abandoned, true)) {
+                    continue;
                 }
 
-                throw new ExpectationFailedException($message);
-            }
+                if (isset($response['error']['error']['message'])) {
+                    $message = $response['error']['error']['message'];
 
-            yield $response;
+                    if (str_contains($message, 'Playwright was just installed or updated')) {
+                        throw new PlaywrightOutdatedException();
+                    }
 
-            if (
-                (isset($response['id']) && $response['id'] === $requestId)
-                || (isset($params['waitUntil']) && isset($response['params']['add']) && $params['waitUntil'] === $response['params']['add'])
-            ) {
-                break;
+                    throw new ExpectationFailedException($message);
+                }
+
+                yield $response;
+
+                if (
+                    (isset($response['id']) && $response['id'] === $requestId)
+                    || (isset($params['waitUntil']) && isset($response['params']['add']) && $params['waitUntil'] === $response['params']['add'])
+                ) {
+                    break;
+                }
             }
+        } catch (CancelledException) {
+            $this->abandon($requestId);
+
+            $subject = $this->subject($method, $params, $timeout, $this->describeMatches($guid, $params));
+
+            throw new ExpectationFailedException($subject.'.', null, new ActionTimedOutException($subject));
         }
     }
 
@@ -190,33 +230,23 @@ final class Client
      * does, and it is the only thing standing between one drifted selector and
      * a test run that never ends.
      *
-     * @throws ExpectationFailedException When no reply arrives before the deadline.
+     * @throws CancelledException When no reply arrives before the deadline.
      */
-    private function fetch(
-        WebsocketConnection $client,
-        string $requestId,
-        string $subject,
-        ?float $deadline,
-    ): string {
+    private function fetch(WebsocketConnection $client, ?float $deadline): string
+    {
         if ($deadline === null) {
             return (string) $client->receive()?->read();
         }
 
         $remaining = $deadline - microtime(true);
 
-        try {
-            if ($remaining <= 0) {
-                throw new CancelledException();
-            }
-
-            $cancellation = new TimeoutCancellation($remaining);
-
-            return (string) $client->receive($cancellation)?->read($cancellation);
-        } catch (CancelledException) {
-            $this->abandon($requestId);
-
-            throw new ExpectationFailedException($subject.'.', null, new ActionTimedOutException($subject));
+        if ($remaining <= 0) {
+            throw new CancelledException();
         }
+
+        $cancellation = new TimeoutCancellation($remaining);
+
+        return (string) $client->receive($cancellation)?->read($cancellation);
     }
 
     /**
@@ -226,9 +256,15 @@ final class Client
      * difference between a reader knowing a label was renamed and a reader
      * having to open the test to find out which label was even asked for.
      *
+     * The match count rides alongside the selector because the two are read
+     * together: a selector that matched nothing and a selector that matched
+     * three things are opposite problems - a label that has been renamed
+     * against a label that is ambiguous - and without the count they produce a
+     * byte-identical message.
+     *
      * @param  array<string, mixed>  $params
      */
-    private function subject(string $method, array $params, int $timeout): string
+    private function subject(string $method, array $params, int $timeout, ?string $matches = null): string
     {
         $subject = sprintf('Timeout %dms exceeded while waiting for [%s]', $timeout, $method);
 
@@ -236,7 +272,154 @@ final class Client
             $subject .= sprintf(' on selector [%s]', $params['selector']);
         }
 
+        if ($matches !== null) {
+            $subject .= sprintf(' (%s)', $matches);
+        }
+
         return $subject;
+    }
+
+    /**
+     * Says how many elements the selector matched, for use in a failure message.
+     *
+     * This is the half of a timeout the message could not previously supply.
+     * The method, the selector, the url and the page's text all describe what
+     * was asked for and where; the count describes what answered, and it is the
+     * only one of them that separates "the label has been renamed" from "the
+     * label is ambiguous". Those need opposite fixes and otherwise look alike.
+     *
+     * Everything here is best effort and nothing here may make the failure
+     * worse. The queries run against the same frame the action ran against, on
+     * a budget of their own that cannot extend the wait that has already
+     * elapsed, and any failure at all - a wrong guid for a page-level call, a
+     * protocol error, a browser that has stopped answering - returns null,
+     * which leaves the message exactly as it reads today.
+     *
+     * @param  array<string, mixed>  $params
+     */
+    private function describeMatches(string $guid, array $params): ?string
+    {
+        $selector = $params['selector'] ?? null;
+
+        if (! is_string($selector) || $selector === '') {
+            return null;
+        }
+
+        $deadline = microtime(true) + (self::DIAGNOSTIC_BUDGET_MILLISECONDS / 1_000);
+
+        try {
+            $count = $this->diagnose($guid, 'queryCount', ['selector' => $selector], $deadline);
+
+            if (! is_int($count)) {
+                return null;
+            }
+
+            $description = sprintf('%d element%s matched', $count, $count === 1 ? '' : 's');
+
+            if ($count <= 1) {
+                return $description;
+            }
+
+            $named = $this->nameMatches($guid, $selector, $deadline);
+
+            return $named === null ? $description : $description.': '.$named;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Names the first few elements the selector matched, as tag and text.
+     *
+     * A bare count of three says the selector is ambiguous but not what it is
+     * ambiguous with. "TH" against "BUTTON" says a table header is eating the
+     * click, which is otherwise a screenshot and a DOM probe away.
+     */
+    private function nameMatches(string $guid, string $selector, float $deadline): ?string
+    {
+        $value = $this->diagnose($guid, 'evalOnSelectorAll', [
+            'selector' => $selector,
+            'expression' => self::NAMED_MATCHES_EXPRESSION,
+            'isFunction' => true,
+            'arg' => JavaScriptSerializer::serializeArgument(self::NAMED_MATCHES),
+        ], $deadline);
+
+        $matches = JavaScriptSerializer::parseValue($value);
+
+        if (! is_array($matches) || $matches === []) {
+            return null;
+        }
+
+        $named = [];
+
+        foreach ($matches as $match) {
+            if (! is_array($match) || ! isset($match['tag']) || ! is_string($match['tag'])) {
+                continue;
+            }
+
+            $text = isset($match['text']) && is_string($match['text'])
+                ? Str::snippet($match['text'], self::MATCH_TEXT_LENGTH)
+                : '';
+
+            $named[] = $text === ''
+                ? sprintf('[%s]', $match['tag'])
+                : sprintf('[%s "%s"]', $match['tag'], $text);
+        }
+
+        return $named === [] ? null : implode(', ', $named);
+    }
+
+    /**
+     * Asks the browser one question on the failure path, or gives up quickly.
+     *
+     * A request of its own rather than a call back into execute(), because
+     * execute() is built for an action: it adds the client's own timeout, it
+     * grants a five second grace on top of that, and it raises an assertion
+     * failure when the answer does not come. All three are wrong for a question
+     * asked by a failure that has already happened, which must be cheap, must
+     * be bounded by the caller's clock, and must never raise anything.
+     *
+     * The id is abandoned if the answer is late, so a reply that arrives after
+     * this has given up is skipped rather than handed to whichever request is
+     * reading the socket by then.
+     *
+     * @param  array<string, mixed>  $params
+     */
+    private function diagnose(string $guid, string $method, array $params, float $deadline): mixed
+    {
+        if (! $this->websocketConnection instanceof WebsocketConnection) {
+            return null;
+        }
+
+        $requestId = uniqid();
+
+        $this->websocketConnection->sendText((string) json_encode([
+            'id' => $requestId,
+            'guid' => $guid,
+            'method' => $method,
+            'params' => $params,
+            'metadata' => [],
+        ]));
+
+        while (true) {
+            try {
+                $responseJson = $this->fetch($this->websocketConnection, $deadline);
+            } catch (CancelledException) {
+                $this->abandon($requestId);
+
+                return null;
+            }
+
+            $response = json_decode($responseJson, true);
+
+            if (! is_array($response) || ($response['id'] ?? null) !== $requestId) {
+                continue;
+            }
+
+            $result = $response['result'] ?? null;
+
+            return is_array($result) ? ($result['value'] ?? null) : null;
+        }
     }
 
     /**

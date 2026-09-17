@@ -27,3 +27,27 @@ it('detects non-regex expressions', function (): void {
 
     expect($result)->toBeFalse();
 });
+
+it('collapses whitespace in a snippet', function (): void {
+    $result = Str::snippet("  Pending\n\t  Requests  ", 40);
+
+    expect($result)->toBe('Pending Requests');
+});
+
+it('truncates a snippet longer than the given length', function (): void {
+    $result = Str::snippet('Pending Requests', 7);
+
+    expect($result)->toBe('Pending...');
+});
+
+it('leaves a snippet of exactly the given length alone', function (): void {
+    $result = Str::snippet('Pending', 7);
+
+    expect($result)->toBe('Pending');
+});
+
+it('returns an empty snippet for a string of only whitespace', function (): void {
+    $result = Str::snippet("  \n  ", 40);
+
+    expect($result)->toBe('');
+});

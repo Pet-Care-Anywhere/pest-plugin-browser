@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Pest\Browser\Api\Concerns;
 
 use Pest\Browser\Api\Webpage;
+use Pest\Browser\Support\Str;
 use Throwable;
 
 /**
@@ -58,14 +59,8 @@ trait DescribesPage
             return '<unavailable>';
         }
 
-        $text = mb_trim((string) preg_replace('/\s+/u', ' ', $text));
+        $text = Str::snippet($text, self::PAGE_TEXT_LENGTH);
 
-        if ($text === '') {
-            return '<empty>';
-        }
-
-        return mb_strlen($text) > self::PAGE_TEXT_LENGTH
-            ? mb_substr($text, 0, self::PAGE_TEXT_LENGTH).'...'
-            : $text;
+        return $text === '' ? '<empty>' : $text;
     }
 }
