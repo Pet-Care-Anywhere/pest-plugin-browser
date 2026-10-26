@@ -17,6 +17,13 @@ use Pest\Browser\Support\ComputeUrl;
 final class PendingAwaitablePage
 {
     /**
+     * The options key holding the scripts added with withInitScript(). It is
+     * kept in the options so From and On carry it, and removed before the
+     * options reach Playwright.
+     */
+    private const string INIT_SCRIPTS = '__pestInitScripts';
+
+    /**
      * The webpage instance that will be returned when the page is visited.
      */
     private ?AwaitableWebpage $waitablePage = null;
@@ -130,6 +137,22 @@ final class PendingAwaitablePage
     }
 
     /**
+     * Adds a script the browser evaluates in every document before any of the
+     * page's own scripts, after the plugin's own init script. Scripts run in
+     * the order they were added.
+     */
+    public function withInitScript(string $source): self
+    {
+        $scripts = $this->options[self::INIT_SCRIPTS] ?? [];
+        assert(is_array($scripts));
+
+        return new self($this->browserType, $this->device, $this->url, [
+            ...$this->options,
+            self::INIT_SCRIPTS => [...$scripts, $source],
+        ]);
+    }
+
+    /**
      * Sets the geolocation for the page.
      */
     public function geolocation(float $latitude, float $longitude): self
@@ -150,20 +173,32 @@ final class PendingAwaitablePage
     {
         $browser = Playwright::browser($this->browserType)->launch();
 
+        $options = $this->options;
+        $initScripts = $options[self::INIT_SCRIPTS] ?? [];
+        unset($options[self::INIT_SCRIPTS]);
+
         $context = $browser->newContext([
             'locale' => 'en-US',
             'timezoneId' => 'UTC',
             'colorScheme' => Playwright::defaultColorScheme()->value,
             ...$this->device->context(),
-            ...$this->options,
+            ...$options,
         ]);
 
         $context->addInitScript(InitScript::get());
 
+        assert(is_array($initScripts));
+
+        foreach ($initScripts as $source) {
+            assert(is_string($source));
+
+            $context->addInitScript($source);
+        }
+
         $url = ComputeUrl::from($this->url);
 
         return new AwaitableWebpage(
-            $context->newPage()->goto($url, $this->options),
+            $context->newPage()->goto($url, $options),
             $url,
         );
     }

@@ -112,6 +112,52 @@ it('may visit a page with a custom userAgent', function (): void {
     expect($userAgent)->toBe('Pest-Browser');
 });
 
+it('may visit a page with init scripts that run before the page scripts', function (): void {
+    Route::get('/', fn (): string => '
+        <html>
+        <head>
+            <script>window.seenByPage = String(window.setByInit) + "," + String(window.setBySecondInit);</script>
+        </head>
+        <body>
+            <h1>Init scripts</h1>
+        </body>
+        </html>
+    ');
+
+    $page = visit('/')
+        ->withInitScript('window.setByInit = "first"; window.order = ["first"];')
+        ->withInitScript('window.setBySecondInit = "second"; window.order.push("second");')
+        ->withLocale('fr-FR');
+
+    $page->assertSee('Init scripts');
+
+    expect($page->script('window.seenByPage'))->toBe('first,second')
+        ->and($page->script('window.order'))->toBe(['first', 'second'])
+        ->and($page->script('navigator.language'))->toBe('fr-FR');
+});
+
+it('keeps init scripts when the device is chosen afterwards', function (): void {
+    Route::get('/', fn (): string => '
+        <html>
+        <head>
+            <script>window.seenByPage = String(window.setByInit);</script>
+        </head>
+        <body>
+            <h1>Init scripts on a device</h1>
+        </body>
+        </html>
+    ');
+
+    $page = visit('/')
+        ->withInitScript('window.setByInit = "kept";')
+        ->on()
+        ->mobile();
+
+    $page->assertSee('Init scripts on a device');
+
+    expect($page->script('window.seenByPage'))->toBe('kept');
+});
+
 it('may visit external URLs', function (): void {
     $page = visit('https://example.com');
 
