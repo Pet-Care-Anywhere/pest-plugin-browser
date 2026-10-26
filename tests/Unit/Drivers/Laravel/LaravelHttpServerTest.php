@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 it('rewrites the URLs on JS files', function (): void {
     @file_put_contents(
@@ -86,4 +87,65 @@ it('delivers several attached files to the application', function (): void {
 
     unlink($first);
     unlink($second);
+});
+
+it('returns a streamed body byte for byte, binary and invalid UTF-8 included', function (): void {
+    $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==', true);
+    $bytes = "\n ".$png."\xff\xfe\x80\xc3 ";
+
+    expect(mb_strlen($png, '8bit'))->toBe(70);
+
+    Route::get('/streamed.bin', fn (): StreamedResponse => new StreamedResponse(
+        function () use ($bytes): void {
+            echo $bytes;
+        },
+        200,
+        ['Content-Type' => 'application/octet-stream', 'Content-Length' => (string) mb_strlen($bytes, '8bit')],
+    ));
+
+    Route::get('/streamed.png', fn (): StreamedResponse => new StreamedResponse(
+        function () use ($png): void {
+            echo $png;
+        },
+        200,
+        ['Content-Type' => 'image/png', 'Content-Length' => (string) mb_strlen($png, '8bit')],
+    ));
+
+    Route::get('/streamed', fn (): string => '<img id="picture" src="/streamed.png" alt="picture">');
+
+    $page = visit('/streamed');
+
+    $received = $page->script(<<<'JS'
+        async () => {
+            const response = await fetch('/streamed.bin');
+            const buffer = await response.arrayBuffer();
+
+            return {
+                contentLength: response.headers.get('content-length'),
+                byteLength: buffer.byteLength,
+                hex: Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+            };
+        }
+        JS);
+
+    expect($received['hex'])->toBe(bin2hex($bytes))
+        ->and($received['byteLength'])->toBe(mb_strlen($bytes, '8bit'))
+        ->and($received['contentLength'])->toBe((string) mb_strlen($bytes, '8bit'));
+
+    $decoded = $page->script(<<<'JS'
+        async () => {
+            const image = document.getElementById('picture');
+
+            if (! image.complete) {
+                await new Promise((resolve) => {
+                    image.addEventListener('load', resolve);
+                    image.addEventListener('error', resolve);
+                });
+            }
+
+            return image.naturalWidth;
+        }
+        JS);
+
+    expect($decoded)->toBe(1);
 });

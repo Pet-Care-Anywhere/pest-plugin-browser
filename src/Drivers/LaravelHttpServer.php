@@ -323,8 +323,7 @@ final class LaravelHttpServer implements HttpServer
                 ob_start();
                 $response->sendContent();
             } finally {
-                // @phpstan-ignore-next-line
-                $content = mb_trim(ob_get_clean());
+                $content = (string) ob_get_clean();
             }
         }
 
